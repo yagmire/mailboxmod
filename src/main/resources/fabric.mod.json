@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "id": "mailboxmod",
+  "version": "${version}",
+
+
+  "name": "MailboxMod",
+  "description": "",
+  "authors": [],
+  "contact": {},
+
+  "license": "All-Rights-Reserved",
+  "icon": "assets/mailboxmod/icon.png",
+
+  "environment": "server",
+  "entrypoints": {
+    "fabric-datagen": ["me.yag.client.MailboxmodDataGenerator"],
+    "main": ["me.yag.Mailboxmod"]
+  },
+
+  "mixins": [
+    "mailboxmod.mixins.json"
+    ,{
+      "config": "mailboxmod.client.mixins.json",
+      "environment": "client"
+    }
+  ],
+
+  "depends": {
+    "fabricloader": ">=${loader_version}",
+    "fabric": "*",
+    "minecraft": "${minecraft_version}"
+  }
+}
