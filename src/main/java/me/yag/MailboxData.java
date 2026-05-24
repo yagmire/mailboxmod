@@ -1,23 +1,26 @@
 package me.yag;
 
 import com.mojang.serialization.Codec;
-import net.minecraft.util.math.BlockPos;
-import net.minecraft.world.PersistentState;
+import com.mojang.serialization.codecs.RecordCodecBuilder;
+import net.minecraft.core.BlockPos;
+import net.minecraft.world.level.saveddata.SavedData;
 
 import java.util.HashMap;
 import java.util.Map;
 
-public class MailboxData extends PersistentState {
+public class MailboxData extends SavedData {
 
     private final Map<String, BlockPos> mailboxes = new HashMap<>();
 
-    // Correct Codec
-    public static final Codec<MailboxData> CODEC = Codec.unboundedMap(Codec.STRING, BlockPos.CODEC)
-            .xmap(map -> {
-                MailboxData data = new MailboxData();
-                data.mailboxes.putAll(map);
-                return data;
-            }, data -> data.mailboxes);
+    public static final Codec<MailboxData> CODEC = RecordCodecBuilder.create(instance -> instance.group(
+            Codec.unboundedMap(Codec.STRING, BlockPos.CODEC)
+                    .fieldOf("mailboxes")
+                    .forGetter(data -> data.mailboxes)
+    ).apply(instance, map -> {
+        MailboxData data = new MailboxData();
+        data.mailboxes.putAll(map);
+        return data;
+    }));
 
     public MailboxData() {
         super();
@@ -38,12 +41,12 @@ public class MailboxData extends PersistentState {
 
     public void addMailbox(String username, BlockPos pos) {
         mailboxes.put(username, pos);
-        markDirty();
+        setDirty();
     }
 
     public void removeMailbox(String username) {
         mailboxes.remove(username);
-        markDirty();
+        setDirty();
     }
 
     public BlockPos getMailbox(String username) {

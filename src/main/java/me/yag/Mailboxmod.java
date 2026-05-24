@@ -6,129 +6,140 @@ import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.fabric.api.event.player.PlayerBlockBreakEvents;
 import net.fabricmc.fabric.api.event.player.UseBlockCallback;
-import net.minecraft.block.BarrelBlock;
-import net.minecraft.block.Blocks;
-import net.minecraft.datafixer.DataFixTypes;
-import net.minecraft.entity.Entity;
-import net.minecraft.entity.EntityType;
-import net.minecraft.entity.decoration.ArmorStandEntity;
-import net.minecraft.inventory.Inventory;
-import net.minecraft.item.ItemStack;
-import net.minecraft.item.Items;
-import net.minecraft.registry.tag.BlockTags;
-import net.minecraft.server.command.CommandManager;
-import net.minecraft.server.command.ServerCommandSource;
-import net.minecraft.server.network.ServerPlayerEntity;
-import net.minecraft.server.world.ServerWorld;
-import net.minecraft.text.Text;
-import net.minecraft.util.ActionResult;
-import net.minecraft.util.Formatting;
-import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Box;
-import net.minecraft.util.math.Direction;
-import net.minecraft.world.PersistentStateType;
-import net.minecraft.sound.SoundEvents;
+import net.minecraft.ChatFormatting;
+import net.minecraft.commands.CommandSourceStack;
+import net.minecraft.commands.Commands;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.core.component.DataComponents;
+import net.minecraft.network.chat.Component;
+import net.minecraft.resources.Identifier;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.sounds.SoundEvents;
+import net.minecraft.tags.BlockTags;
+import net.minecraft.util.datafix.DataFixTypes;
+import net.minecraft.world.Container;
+import net.minecraft.world.InteractionResult;
+import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.decoration.ArmorStand;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
+import net.minecraft.world.item.component.ItemLore;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.BarrelBlock;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.saveddata.SavedDataType;
+import net.minecraft.world.phys.AABB;
+
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 // im aware this code is some buns, i made it in like 6 hours...
 
 public class Mailboxmod implements ModInitializer {
-    private final java.util.Map<java.util.UUID, Long> cooldowns = new java.util.HashMap<>();
-    private final Map<String, Boolean> pendingMail = new java.util.HashMap<>();
+    private final Map<java.util.UUID, Long> cooldowns = new HashMap<>();
+    private final Map<String, Boolean> pendingMail = new HashMap<>();
+    private int repairTickCounter = 0;
 
-    public static final PersistentStateType<MailboxData> MAILBOX_TYPE =
-            new PersistentStateType<>(
-                    "mailbox_data",
-                    context -> new MailboxData(),
-                    context -> MailboxData.CODEC,
+    public static final SavedDataType<MailboxData> MAILBOX_TYPE =
+            new SavedDataType<>(
+                    Identifier.fromNamespaceAndPath("mailboxmod", "mailbox_data"),
+                    MailboxData::new,
+                    MailboxData.CODEC,
                     DataFixTypes.LEVEL
             );
+
+    private static MailboxData getMailboxData(MinecraftServer server) {
+        return server.getLevel(Level.OVERWORLD).getDataStorage().computeIfAbsent(MAILBOX_TYPE);
+    }
 
     @Override
     public void onInitialize() {
 
-        ServerTickEvents.END_WORLD_TICK.register(world -> {
-            for (ServerPlayerEntity player : world.getPlayers()) {
-                if (pendingMail.getOrDefault(player.getName().getString(), false)) {
-                    player.sendMessage(Text.literal("You have mail! Check your mailbox.").formatted(Formatting.GOLD), false);
-                    player.playSound(SoundEvents.BLOCK_NOTE_BLOCK_BELL.value(), 1.0f, 1.0f);
-                    pendingMail.put(player.getName().getString(), false);
+        ServerTickEvents.END_LEVEL_TICK.register(world -> {
+            for (ServerPlayer player : world.players()) {
+                if (pendingMail.getOrDefault(player.getScoreboardName(), false)) {
+                    player.sendSystemMessage(Component.literal("You have mail! Check your mailbox.").withStyle(ChatFormatting.GOLD), false);
+                    player.playSound(SoundEvents.NOTE_BLOCK_BELL.value(), 1.0f, 1.0f);
+                    pendingMail.put(player.getScoreboardName(), false);
                 }
             }
         });
 
         UseBlockCallback.EVENT.register((player, world, hand, hitResult) -> {
-            if (world.isClient()) return ActionResult.PASS;
-            ServerPlayerEntity serverPlayer = (ServerPlayerEntity) player;
-            ServerWorld serverWorld = (ServerWorld) world;
+            if (world.isClientSide()) return InteractionResult.PASS;
+            ServerPlayer serverPlayer = (ServerPlayer) player;
+            ServerLevel serverWorld = (ServerLevel) world;
             BlockPos clickedPos = hitResult.getBlockPos();
-            ItemStack stack = player.getStackInHand(hand);
+            ItemStack stack = player.getItemInHand(hand);
 
-            MailboxData data = serverWorld.getPersistentStateManager().getOrCreate(MAILBOX_TYPE);
+            MailboxData data = getMailboxData(serverWorld.getServer());
 
             if (world.getBlockState(clickedPos).getBlock() == Blocks.BARREL) {
                 String owner = data.getOwnerAt(clickedPos);
-                boolean onFence = world.getBlockState(clickedPos.down()).isIn(BlockTags.FENCES);
+                boolean onFence = world.getBlockState(clickedPos.below()).is(BlockTags.FENCES);
 
                 if (owner != null && onFence) {
-                    if (!owner.equals(serverPlayer.getName().getString())) {
-                        serverPlayer.sendMessage(Text.literal("This mailbox belongs to " + owner + "!").formatted(Formatting.RED), true);
-                        return ActionResult.FAIL;
+                    if (!owner.equals(serverPlayer.getScoreboardName())) {
+                        serverPlayer.sendSystemMessage(Component.literal("This mailbox belongs to " + owner + "!").withStyle(ChatFormatting.RED), true);
+                        return InteractionResult.FAIL;
                     } else {
                         updateMailboxLabel(serverWorld, clickedPos, owner, false);
                     }
                 }
             }
 
-
             if (stack.getItem() == Items.BARREL) {
-                BlockPos placePos = clickedPos.offset(hitResult.getSide());
+                BlockPos placePos = clickedPos.relative(hitResult.getDirection());
 
-                boolean onFence = world.getBlockState(placePos.down()).isIn(BlockTags.FENCES);
+                boolean onFence = world.getBlockState(placePos.below()).is(BlockTags.FENCES);
                 boolean isAir = world.getBlockState(placePos).isAir();
 
                 if (onFence && isAir) {
-                    if (data.hasMailbox(serverPlayer.getName().getString())) {
-                        serverPlayer.sendMessage(Text.literal("You already have a mailbox!").formatted(Formatting.RED), true);
-                        return ActionResult.FAIL;
+                    if (data.hasMailbox(serverPlayer.getScoreboardName())) {
+                        serverPlayer.sendSystemMessage(Component.literal("You already have a mailbox!").withStyle(ChatFormatting.RED), true);
+                        return InteractionResult.FAIL;
                     }
 
-                    Direction playerFacing = player.getHorizontalFacing().getOpposite();
-                    world.setBlockState(placePos, Blocks.BARREL.getDefaultState().with(BarrelBlock.FACING, playerFacing), 3);
+                    Direction playerFacing = player.getDirection().getOpposite();
+                    world.setBlock(placePos, Blocks.BARREL.defaultBlockState().setValue(BarrelBlock.FACING, playerFacing), 3);
 
-                    updateMailboxLabel(serverWorld, placePos, serverPlayer.getName().getString(), false);
+                    updateMailboxLabel(serverWorld, placePos, serverPlayer.getScoreboardName(), false);
 
-                    if (!serverPlayer.isCreative()) stack.decrement(1);
-                    data.addMailbox(serverPlayer.getName().getString(), placePos);
-                    serverPlayer.sendMessage(Text.literal("Mailbox created!").formatted(Formatting.GREEN), false);
-                    return ActionResult.SUCCESS;
+                    if (!serverPlayer.isCreative()) stack.shrink(1);
+                    data.addMailbox(serverPlayer.getScoreboardName(), placePos);
+                    serverPlayer.sendSystemMessage(Component.literal("Mailbox created!").withStyle(ChatFormatting.GREEN), false);
+                    return InteractionResult.SUCCESS;
                 }
             }
 
-
-            return ActionResult.PASS;
+            return InteractionResult.PASS;
         });
 
         PlayerBlockBreakEvents.BEFORE.register((world, player, pos, state, blockEntity) -> {
-            if (!(world instanceof ServerWorld serverWorld)) return true;
+            if (!(world instanceof ServerLevel serverWorld)) return true;
+            if (!(player instanceof ServerPlayer serverPlayer)) return true;
 
             if (state.getBlock() == Blocks.BARREL) {
-                MailboxData data = serverWorld.getPersistentStateManager().getOrCreate(MAILBOX_TYPE);
+                MailboxData data = getMailboxData(serverWorld.getServer());
                 String owner = data.getOwnerAt(pos);
-                boolean onFence = world.getBlockState(pos.down()).isIn(BlockTags.FENCES);
+                boolean onFence = world.getBlockState(pos.below()).is(BlockTags.FENCES);
 
                 if (owner != null && onFence) {
-                    boolean isAdmin = player.hasPermissionLevel(2);
-                    boolean isOwner = owner.equals(player.getName().getString());
+                    boolean isAdmin = Commands.LEVEL_GAMEMASTERS.check(serverPlayer.permissions());
+                    boolean isOwner = owner.equals(serverPlayer.getScoreboardName());
 
                     if (isOwner || isAdmin) {
                         removeMailboxLabel(serverWorld, pos);
                         data.removeMailbox(owner);
-                        player.sendMessage(Text.literal("Mailbox removed.").formatted(Formatting.YELLOW), false);
+                        serverPlayer.sendSystemMessage(Component.literal("Mailbox removed.").withStyle(ChatFormatting.YELLOW), false);
                         return true;
                     } else {
-                        player.sendMessage(Text.literal("You cannot break " + owner + "'s mailbox!").formatted(Formatting.RED), true);
+                        serverPlayer.sendSystemMessage(Component.literal("You cannot break " + owner + "'s mailbox!").withStyle(ChatFormatting.RED), true);
                         return false;
                     }
                 }
@@ -136,121 +147,123 @@ public class Mailboxmod implements ModInitializer {
             return true;
         });
 
-
         ServerTickEvents.START_SERVER_TICK.register(server -> {
-            for (ServerWorld world : server.getWorlds()) {
-                MailboxData data = world.getPersistentStateManager().getOrCreate(MAILBOX_TYPE);
-                for (Map.Entry<String, BlockPos> entry : data.getAllMailboxes().entrySet()) {
-                    if (world.getBlockState(entry.getValue()).getBlock() == Blocks.BARREL) {
-                        ensureLabelExists(world, entry.getValue(), entry.getKey());
-                    }
+            ServerLevel overworld = server.getLevel(Level.OVERWORLD);
+            MailboxData data = getMailboxData(server);
+
+            List<String> toRemove = new ArrayList<>();
+            for (Map.Entry<String, BlockPos> entry : data.getAllMailboxes().entrySet()) {
+                BlockPos pos = entry.getValue();
+                if (overworld.getBlockState(pos).getBlock() == Blocks.BARREL) {
+                    ensureLabelExists(overworld, pos, entry.getKey());
+                } else {
+                    removeMailboxLabel(overworld, pos);
+                    toRemove.add(entry.getKey());
                 }
+            }
+            for (String owner : toRemove) data.removeMailbox(owner);
+
+            if (++repairTickCounter >= 600) {
+                repairTickCounter = 0;
+                repairOrphanedLabels(overworld, data);
             }
         });
 
         CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> {
-            dispatcher.register(CommandManager.literal("mailTo")
-                    .then(CommandManager.argument("username", StringArgumentType.word())
+            dispatcher.register(Commands.literal("mailTo")
+                    .then(Commands.argument("username", StringArgumentType.word())
                             .executes(context -> mailToCommand(context))));
 
             dispatcher.register(
-                    CommandManager.literal("mailbox")
-                            .requires(source -> source.hasPermissionLevel(2))
-                            .then(CommandManager.literal("deleteNearest")
+                    Commands.literal("mailbox")
+                            .requires(Commands.hasPermission(Commands.LEVEL_GAMEMASTERS))
+                            .then(Commands.literal("deleteNearest")
                                     .executes(ctx -> deleteNearestMailbox(ctx.getSource())))
-                            .then(CommandManager.literal("inspect")
-                                    .then(CommandManager.argument("owner", StringArgumentType.word())
+                            .then(Commands.literal("inspect")
+                                    .then(Commands.argument("owner", StringArgumentType.word())
                                             .executes(ctx -> inspectMailbox(ctx.getSource(),
                                                     StringArgumentType.getString(ctx, "owner")))))
-                            .then(CommandManager.literal("list")
+                            .then(Commands.literal("list")
                                     .executes(ctx -> listMailboxes(ctx.getSource())))
-                            .then(CommandManager.literal("tp")
-                                    .then(CommandManager.argument("owner", StringArgumentType.word())
+                            .then(Commands.literal("tp")
+                                    .then(Commands.argument("owner", StringArgumentType.word())
                                             .executes(ctx -> teleportToMailbox(ctx.getSource(),
                                                     StringArgumentType.getString(ctx, "owner")))))
             );
         });
-
     }
 
-    private int inspectMailbox(ServerCommandSource source, String owner) {
-        ServerPlayerEntity player;
-        try { player = source.getPlayer(); } catch (Exception e) { return 0; }
+    private int inspectMailbox(CommandSourceStack source, String owner) {
+        ServerPlayer player = source.getPlayer();
+        if (player == null) return 0;
 
-        ServerWorld world = player.getEntityWorld();
-        MailboxData data = world.getPersistentStateManager().getOrCreate(MAILBOX_TYPE);
+        ServerLevel overworld = source.getServer().getLevel(Level.OVERWORLD);
+        MailboxData data = getMailboxData(source.getServer());
         BlockPos mailboxPos = data.getMailbox(owner);
 
-        if (mailboxPos == null || !(world.getBlockState(mailboxPos).getBlock() instanceof BarrelBlock)) {
-            player.sendMessage(Text.literal(owner + " has no mailbox!").formatted(Formatting.RED), false);
+        if (mailboxPos == null || !(overworld.getBlockState(mailboxPos).getBlock() instanceof BarrelBlock)) {
+            player.sendSystemMessage(Component.literal(owner + " has no mailbox!").withStyle(ChatFormatting.RED));
             return 0;
         }
 
-        Inventory inv = (Inventory) world.getBlockEntity(mailboxPos);
-        player.sendMessage(Text.literal(owner + "'s Mailbox Contents:").formatted(Formatting.YELLOW), false);
+        Container inv = (Container) overworld.getBlockEntity(mailboxPos);
+        player.sendSystemMessage(Component.literal(owner + "'s Mailbox Contents:").withStyle(ChatFormatting.YELLOW));
 
-        for (int i = 0; i < inv.size(); i++) {
-            ItemStack stack = inv.getStack(i);
+        for (int i = 0; i < inv.getContainerSize(); i++) {
+            ItemStack stack = inv.getItem(i);
             if (!stack.isEmpty()) {
-                player.sendMessage(Text.literal("- " + stack.getCount() + "x " + stack.getName().getString()), false);
+                player.sendSystemMessage(Component.literal("- " + stack.getCount() + "x " + stack.getHoverName().getString()));
             }
         }
 
         return 1;
     }
 
-    private int listMailboxes(ServerCommandSource source) {
-        ServerPlayerEntity player;
-        try { player = source.getPlayer(); } catch (Exception e) { return 0; }
+    private int listMailboxes(CommandSourceStack source) {
+        ServerPlayer player = source.getPlayer();
+        if (player == null) return 0;
 
-        ServerWorld world = player.getEntityWorld();
-        MailboxData data = world.getPersistentStateManager().getOrCreate(MAILBOX_TYPE);
+        MailboxData data = getMailboxData(source.getServer());
         Map<String, BlockPos> all = data.getAllMailboxes();
 
         if (all.isEmpty()) {
-            player.sendMessage(Text.literal("No mailboxes found.").formatted(Formatting.RED), false);
+            player.sendSystemMessage(Component.literal("No mailboxes found.").withStyle(ChatFormatting.RED));
             return 0;
         }
 
-        player.sendMessage(Text.literal("Server Mailboxes:").formatted(Formatting.YELLOW), false);
+        player.sendSystemMessage(Component.literal("Server Mailboxes:").withStyle(ChatFormatting.YELLOW));
         for (Map.Entry<String, BlockPos> entry : all.entrySet()) {
-            player.sendMessage(Text.literal("- " + entry.getKey() + " at " + entry.getValue()), false);
+            player.sendSystemMessage(Component.literal("- " + entry.getKey() + " at " + entry.getValue()));
         }
 
         return 1;
     }
 
-    private int teleportToMailbox(ServerCommandSource source, String owner) {
-        ServerPlayerEntity player;
-        try { player = source.getPlayer(); } catch (Exception e) { return 0; }
+    private int teleportToMailbox(CommandSourceStack source, String owner) {
+        ServerPlayer player = source.getPlayer();
+        if (player == null) return 0;
 
-        ServerWorld world = player.getEntityWorld();
-        MailboxData data = world.getPersistentStateManager().getOrCreate(MAILBOX_TYPE);
+        MailboxData data = getMailboxData(source.getServer());
         BlockPos pos = data.getMailbox(owner);
 
         if (pos == null) {
-            player.sendMessage(Text.literal(owner + " has no mailbox!").formatted(Formatting.RED), false);
+            player.sendSystemMessage(Component.literal(owner + " has no mailbox!").withStyle(ChatFormatting.RED));
             return 0;
         }
 
-        player.requestTeleportAndDismount(pos.getX() + 0.5, pos.getY() + 1, pos.getZ() + 0.5);
-        player.sendMessage(Text.literal("Teleported to " + owner + "'s mailbox.").formatted(Formatting.GREEN), false);
+        player.teleportTo(pos.getX() + 0.5, pos.getY() + 1, pos.getZ() + 0.5);
+        player.sendSystemMessage(Component.literal("Teleported to " + owner + "'s mailbox.").withStyle(ChatFormatting.GREEN));
         return 1;
     }
 
+    private int deleteNearestMailbox(CommandSourceStack source) {
+        ServerPlayer player = source.getPlayer();
+        if (player == null) return 0;
 
-    private int deleteNearestMailbox(ServerCommandSource source) {
-        ServerPlayerEntity player;
-        try {
-            player = source.getPlayer();
-        } catch (Exception e) {
-            return 0;
-        }
+        ServerLevel overworld = source.getServer().getLevel(Level.OVERWORLD);
+        MailboxData data = getMailboxData(source.getServer());
 
-        ServerWorld world = player.getEntityWorld();
-        MailboxData data = world.getPersistentStateManager().getOrCreate(MAILBOX_TYPE);
-
-        BlockPos playerPos = player.getBlockPos();
+        BlockPos playerPos = player.blockPosition();
 
         BlockPos closestPos = null;
         String closestOwner = null;
@@ -259,9 +272,9 @@ public class Mailboxmod implements ModInitializer {
         for (Map.Entry<String, BlockPos> entry : data.getAllMailboxes().entrySet()) {
             BlockPos mailboxPos = entry.getValue();
 
-            if (world.getBlockState(mailboxPos).getBlock() != Blocks.BARREL) continue;
+            if (overworld.getBlockState(mailboxPos).getBlock() != Blocks.BARREL) continue;
 
-            double distSq = mailboxPos.getSquaredDistance(playerPos);
+            double distSq = mailboxPos.distSqr(playerPos);
 
             if (distSq <= 25 && distSq < closestDistanceSq) {
                 closestDistanceSq = distSq;
@@ -271,33 +284,29 @@ public class Mailboxmod implements ModInitializer {
         }
 
         if (closestPos == null) {
-            player.sendMessage(
-                    Text.literal("No mailbox found within 5 blocks.")
-                            .formatted(Formatting.RED),
-                    false
+            player.sendSystemMessage(
+                    Component.literal("No mailbox found within 5 blocks.")
+                            .withStyle(ChatFormatting.RED)
             );
             return 0;
         }
 
-        world.setBlockState(closestPos, Blocks.AIR.getDefaultState(), 3);
-
-        removeMailboxLabel(world, closestPos);
+        overworld.setBlock(closestPos, Blocks.AIR.defaultBlockState(), 3);
+        removeMailboxLabel(overworld, closestPos);
         data.removeMailbox(closestOwner);
 
-        player.sendMessage(
-                Text.literal("Removed mailbox owned by ")
-                        .append(Text.literal(closestOwner).formatted(Formatting.GOLD))
-                        .formatted(Formatting.YELLOW),
-                false
+        player.sendSystemMessage(
+                Component.literal("Removed mailbox owned by ")
+                        .append(Component.literal(closestOwner).withStyle(ChatFormatting.GOLD))
+                        .withStyle(ChatFormatting.YELLOW)
         );
 
         return 1;
     }
 
-
-    private void updateMailboxLabel(ServerWorld world, BlockPos pos, String owner, boolean hasMail) {
+    private void updateMailboxLabel(ServerLevel world, BlockPos pos, String owner, boolean hasMail) {
         removeMailboxLabel(world, pos);
-        ArmorStandEntity label = new ArmorStandEntity(EntityType.ARMOR_STAND, world);
+        ArmorStand label = new ArmorStand(EntityType.ARMOR_STAND, world);
         label.setInvisible(true);
         label.setInvulnerable(true);
         label.setNoGravity(true);
@@ -308,111 +317,149 @@ public class Mailboxmod implements ModInitializer {
             text = "§6● §f" + owner + "'s Mailbox §6● §7(New Mail!)";
         }
 
-        label.setCustomName(Text.literal(text));
-        label.updatePosition(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5);
-        world.spawnEntity(label);
+        label.setCustomName(Component.literal(text));
+        label.setPos(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5);
+        world.addFreshEntity(label);
     }
 
-    private void removeMailboxLabel(ServerWorld world, BlockPos pos) {
-        List<ArmorStandEntity> entities = world.getEntitiesByClass(ArmorStandEntity.class, new Box(pos).expand(0.1), e -> true);
-        for (ArmorStandEntity stand : entities) stand.remove(Entity.RemovalReason.DISCARDED);
+    private void removeMailboxLabel(ServerLevel world, BlockPos pos) {
+        List<ArmorStand> entities = world.getEntitiesOfClass(ArmorStand.class, new AABB(pos).inflate(0.1), e -> true);
+        for (ArmorStand stand : entities) stand.discard();
     }
 
-
-    private void ensureLabelExists(ServerWorld world, BlockPos pos, String owner) {
-        List<ArmorStandEntity> entities = world.getEntitiesByClass(ArmorStandEntity.class, new Box(pos).expand(0.1), e -> true);
+    private void ensureLabelExists(ServerLevel world, BlockPos pos, String owner) {
+        List<ArmorStand> entities = world.getEntitiesOfClass(ArmorStand.class, new AABB(pos).inflate(0.1), e -> true);
         if (entities.isEmpty()) updateMailboxLabel(world, pos, owner, false);
     }
 
-    private int mailToCommand(com.mojang.brigadier.context.CommandContext<ServerCommandSource> context) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
-        ServerPlayerEntity sender = context.getSource().getPlayer();
+    private void repairOrphanedLabels(ServerLevel world, MailboxData data) {
+        Map<BlockPos, String> registeredByPos = new HashMap<>();
+        for (Map.Entry<String, BlockPos> entry : data.getAllMailboxes().entrySet()) {
+            registeredByPos.put(entry.getValue(), entry.getKey());
+        }
+
+        AABB searchBounds = new AABB(-30_000_000, -320, -30_000_000, 30_000_000, 320, 30_000_000);
+        List<ArmorStand> stands = world.getEntitiesOfClass(ArmorStand.class, searchBounds,
+                e -> e.getCustomName() != null && e.getCustomName().getString().contains("'s Mailbox"));
+
+        for (ArmorStand stand : stands) {
+            BlockPos pos = stand.blockPosition();
+            boolean barrelPresent = world.getBlockState(pos).getBlock() == Blocks.BARREL;
+            boolean onFence = world.getBlockState(pos.below()).is(BlockTags.FENCES);
+
+            if (!barrelPresent || !onFence) {
+                stand.discard();
+                continue;
+            }
+
+            if (!registeredByPos.containsKey(pos)) {
+                String owner = extractOwnerFromLabel(stand.getCustomName().getString());
+                if (owner != null && !owner.isEmpty() && !data.hasMailbox(owner)) {
+                    data.addMailbox(owner, pos);
+                    registeredByPos.put(pos, owner);
+                } else {
+                    stand.discard();
+                }
+            }
+        }
+    }
+
+    private String extractOwnerFromLabel(String label) {
+        String clean = label.replaceAll("§.", "").trim();
+        if (clean.startsWith("● ")) clean = clean.substring(2).trim();
+        int idx = clean.indexOf("'s Mailbox");
+        return idx > 0 ? clean.substring(0, idx) : null;
+    }
+
+    private int mailToCommand(com.mojang.brigadier.context.CommandContext<CommandSourceStack> context) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayer sender = context.getSource().getPlayer();
         if (sender == null) return 0;
 
         long currentTime = System.currentTimeMillis();
-        if (currentTime - cooldowns.getOrDefault(sender.getUuid(), 0L) < 20000) {
-            sender.sendMessage(Text.literal("Wait before sending more mail!").formatted(Formatting.RED), true);
+        if (currentTime - cooldowns.getOrDefault(sender.getUUID(), 0L) < 20000) {
+            sender.sendSystemMessage(Component.literal("Wait before sending more mail!").withStyle(ChatFormatting.RED), true);
             return 0;
         }
 
         String targetUsername = StringArgumentType.getString(context, "username");
-        if (sender.getName().getString().equalsIgnoreCase(targetUsername)) {
-            sender.sendMessage(Text.literal("You cannot send mail to yourself!").formatted(Formatting.RED), true);
+        if (sender.getScoreboardName().equalsIgnoreCase(targetUsername)) {
+            sender.sendSystemMessage(Component.literal("You cannot send mail to yourself!").withStyle(ChatFormatting.RED), true);
             return 0;
         }
 
-        ServerWorld world = sender.getEntityWorld();
-        ItemStack handStack = sender.getMainHandStack();
+        MinecraftServer server = context.getSource().getServer();
+        ServerLevel overworld = server.getLevel(Level.OVERWORLD);
+        ItemStack handStack = sender.getMainHandItem();
         if (handStack.isEmpty()) {
-            sender.sendMessage(Text.literal("You must hold an item to mail!").formatted(Formatting.RED), true);
+            sender.sendSystemMessage(Component.literal("You must hold an item to mail!").withStyle(ChatFormatting.RED), true);
             return 0;
         }
 
-        MailboxData data = world.getPersistentStateManager().getOrCreate(MAILBOX_TYPE);
+        MailboxData data = getMailboxData(server);
         BlockPos mailboxPos = data.getMailbox(targetUsername);
 
-        if (mailboxPos == null || !(world.getBlockState(mailboxPos).getBlock() instanceof BarrelBlock)) {
-            sender.sendMessage(Text.literal("Target has no mailbox! If the player's mailbox is in another dimension, you must be in that dimension to send them mail.").formatted(Formatting.RED), false);
+        if (mailboxPos == null || !(overworld.getBlockState(mailboxPos).getBlock() instanceof BarrelBlock)) {
+            sender.sendSystemMessage(Component.literal("Target has no mailbox!").withStyle(ChatFormatting.RED));
             return 0;
         }
 
-        Inventory inventory = (Inventory) world.getBlockEntity(mailboxPos);
+        Container inventory = (Container) overworld.getBlockEntity(mailboxPos);
         ItemStack stackToSend = handStack.copy();
 
-        sender.playSound(
-                SoundEvents.ENTITY_PLAYER_LEVELUP,
-                1.0f, // volume
-                1.0f  // pitch
-        );
+        sender.playSound(SoundEvents.PLAYER_LEVELUP, 1.0f, 1.0f);
 
-        net.minecraft.component.type.LoreComponent lore = stackToSend.getOrDefault(net.minecraft.component.DataComponentTypes.LORE, net.minecraft.component.type.LoreComponent.DEFAULT);
-        java.util.List<Text> lines = new java.util.ArrayList<>();
-        for (Text t : lore.lines()) if (!t.getString().startsWith("From: ")) lines.add(t);
-        lines.add(Text.literal("From: ").formatted(Formatting.GRAY)
-                .append(Text.literal(sender.getName().getString()).formatted(Formatting.GOLD))
-                .styled(s -> s.withItalic(false)));
-        stackToSend.set(net.minecraft.component.DataComponentTypes.LORE, new net.minecraft.component.type.LoreComponent(lines));
+        ItemLore lore = stackToSend.getOrDefault(DataComponents.LORE, ItemLore.EMPTY);
+        java.util.List<Component> lines = new java.util.ArrayList<>();
+        for (Component t : lore.lines()) if (!t.getString().startsWith("From: ")) lines.add(t);
+        lines.add(Component.literal("From: ").withStyle(ChatFormatting.GRAY)
+                .append(Component.literal(sender.getScoreboardName()).withStyle(ChatFormatting.GOLD))
+                .withStyle(s -> s.withItalic(false)));
+        stackToSend.set(DataComponents.LORE, new ItemLore(lines));
 
         ItemStack sentStack = stackToSend.copy();
 
-        for (int i = 0; i < inventory.size(); i++) {
+        for (int i = 0; i < inventory.getContainerSize(); i++) {
             if (stackToSend.isEmpty()) break;
-            ItemStack slot = inventory.getStack(i);
+            ItemStack slot = inventory.getItem(i);
             if (slot.isEmpty()) {
-                inventory.setStack(i, stackToSend);
+                inventory.setItem(i, stackToSend);
                 stackToSend = ItemStack.EMPTY;
-            } else if (ItemStack.areItemsAndComponentsEqual(slot, stackToSend)) {
-                int count = Math.min(stackToSend.getCount(), slot.getMaxCount() - slot.getCount());
-                slot.increment(count);
-                stackToSend.decrement(count);
+            } else if (ItemStack.isSameItemSameComponents(slot, stackToSend)) {
+                int maxSize = slot.getOrDefault(DataComponents.MAX_STACK_SIZE, 64);
+                int count = Math.min(stackToSend.getCount(), maxSize - slot.getCount());
+                slot.grow(count);
+                stackToSend.shrink(count);
             }
         }
 
         if (!sentStack.isEmpty() && sentStack.getCount() != stackToSend.getCount()) {
-            updateMailboxLabel(world, mailboxPos, targetUsername, true);
+            updateMailboxLabel(overworld, mailboxPos, targetUsername, true);
         }
 
         int sentCount = sentStack.getCount() - stackToSend.getCount();
         if (sentCount > 0) {
-            handStack.decrement(sentCount);
+            handStack.shrink(sentCount);
         }
 
         if (!stackToSend.isEmpty()) {
-            sender.getInventory().offerOrDrop(stackToSend);
+            if (!sender.getInventory().add(stackToSend)) {
+                sender.drop(stackToSend, false);
+            }
         }
 
-        inventory.markDirty();
-        cooldowns.put(sender.getUuid(), currentTime);
+        inventory.setChanged();
+        cooldowns.put(sender.getUUID(), currentTime);
 
         if (sentCount > 0) {
-            sender.sendMessage(Text.literal("Sent " + sentCount + "x " + sentStack.getName().getString() + " to " + targetUsername + "!").formatted(Formatting.GREEN), false);
+            sender.sendSystemMessage(Component.literal("Sent " + sentCount + "x " + sentStack.getHoverName().getString() + " to " + targetUsername + "!").withStyle(ChatFormatting.GREEN));
         } else {
-            sender.sendMessage(Text.literal("Could not send any items to " + targetUsername + "!").formatted(Formatting.RED), false);
+            sender.sendSystemMessage(Component.literal("Could not send any items to " + targetUsername + "!").withStyle(ChatFormatting.RED));
         }
 
-        ServerPlayerEntity recipient = world.getServer().getPlayerManager().getPlayer(targetUsername);
+        ServerPlayer recipient = server.getPlayerList().getPlayerByName(targetUsername);
         if (recipient != null) {
-            recipient.sendMessage(Text.literal("You received mail from " + sender.getName().getString() + "!").formatted(Formatting.AQUA), false);
-            recipient.playSound(SoundEvents.BLOCK_NOTE_BLOCK_BELL.value(), 1.0f, 1.0f);
+            recipient.sendSystemMessage(Component.literal("You received mail from " + sender.getScoreboardName() + "!").withStyle(ChatFormatting.AQUA));
+            recipient.playSound(SoundEvents.NOTE_BLOCK_BELL.value(), 1.0f, 1.0f);
         } else {
             pendingMail.put(targetUsername, true);
         }
